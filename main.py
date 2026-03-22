@@ -144,7 +144,7 @@ async def main():
     scheduler = AsyncIOScheduler(timezone="Europe/Kyiv")
     scheduler.add_job(
         daily_weather_job,
-        CronTrigger(hour=19, minute=32),
+        CronTrigger(hour=6, minute=00),
         id="daily_weather_kharkiv",
         replace_existing=True,
     )
