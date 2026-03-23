@@ -45,13 +45,8 @@ USER_LOCATION: dict[str, tuple[float, float]] = {}
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Привет! Я бот прогноза погоды.\n\nНапиши /weather")
-
-
-@router.message(Command("weather"))
-async def cmd_weather(message: types.Message):
-    await message.answer("Отправь геолокацию", reply_markup=location_kb)
-
+    await message.answer("Привет! Я бот прогноза погоды.\n")
+    await message.answer("Отправьте геолокацию", reply_markup=location_kb)
 
 @router.message(F.location)
 async def handle_location(message: types.Message):
@@ -98,11 +93,11 @@ async def get_weather_text(lat: float, lon: float) -> str | None:
                 sunrise_dt = datetime.fromtimestamp(sunrise, tz=timezone.utc) + timedelta(seconds=tz_offset)
                 sunset_dt = datetime.fromtimestamp(sunset, tz=timezone.utc) + timedelta(seconds=tz_offset)
                 day=datetime.now().strftime("%A")
-                dayt=datetime.now().strftime("%H:%M:%S")
+                daytime=datetime.now()+timedelta(hours=tz_offset)
 
                 return (
                     f"🌤 <b>Погода сейчас: {day}\n"
-                    f"{dayt}</b>\n"
+                    f"{daytime}</b>\n"
                     f"Температура: <b>{temp:.1f}°C</b>\n"
                     f"{desc.capitalize()}\n\n"
                     f"Ощущается: {feel:.1f}°C\n"
