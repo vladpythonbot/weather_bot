@@ -24,10 +24,8 @@ load_dotenv()
 TOKEN = getenv("BOT_TOKEN")
 CHAT_ID = getenv("CHAT_ID")
 
-if not TOKEN or not CHAT_ID:
-    raise ValueError("BOT_TOKEN или CHAT_ID не указаны в .env")
-
-CHAT_ID = str(CHAT_ID)
+if not TOKEN:
+    raise ValueError("BOT_TOKEN yе указан в .env")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
