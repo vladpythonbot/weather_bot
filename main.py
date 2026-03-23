@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from os import getenv
-
+from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
@@ -93,11 +93,13 @@ async def get_weather_text(lat: float, lon: float) -> str | None:
                 sunrise_dt = datetime.fromtimestamp(sunrise, tz=timezone.utc) + timedelta(seconds=tz_offset)
                 sunset_dt = datetime.fromtimestamp(sunset, tz=timezone.utc) + timedelta(seconds=tz_offset)
                 day=datetime.now().strftime("%A")
-                daytime=datetime.now()+timedelta(hours=tz_offset)
+                kyiv_tz = ZoneInfo("Europe/Kyiv")
+                local_now = datetime.now(kyiv_tz)
+                current_time_str = local_now.strftime('%H:%M')
 
                 return (
                     f"🌤 <b>Погода сейчас: {day}\n"
-                    f"{daytime}</b>\n"
+                    f"{current_time_str}</b>\n"
                     f"Температура: <b>{temp:.1f}°C</b>\n"
                     f"{desc.capitalize()}\n\n"
                     f"Ощущается: {feel:.1f}°C\n"
