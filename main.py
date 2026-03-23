@@ -138,7 +138,7 @@ async def daily_weather_job():
     logger.info(f"Ежедневная погода отправлена в {CHAT_ID}")
 
 async def main():
-    scheduler = AsyncIOScheduler(timezone="Europe/Kyiv")
+    scheduler = AsyncIOScheduler(kyiv_tz = ZoneInfo("Europe/Kyiv"))
     scheduler.add_job(
         daily_weather_job,
         CronTrigger(hour=6, minute=00),
