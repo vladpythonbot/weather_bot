@@ -84,8 +84,12 @@ async def get_location(message: types.Message, state: FSMContext):
 
 @router.message(Form.wait_time)
 async def get_time(message: types.Message, state: FSMContext):
+    if not message.text:
+        await message.answer("❌ Пожалуйста, введите время текстом в формате ЧЧ:ММ")
+        return
+    time_str = message.text.strip()
     try:
-        hour, minute = map(int, message.text.split(":"))
+        hour, minute = map(int, time_str.split(":"))
 
         if not (0 <= hour < 24):
             raise ValueError("Неверный час")
