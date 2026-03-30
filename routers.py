@@ -34,8 +34,7 @@ main_keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="🌤 Погода сейчас")],
         [KeyboardButton(text="📍 Изменить местоположение"),
          KeyboardButton(text="⏰ Изменить время")],
-        [KeyboardButton(text="📋 Мои настройки"),
-         KeyboardButton(text="❌ Отмена")]
+        [KeyboardButton(text="📋 Мои настройки")]
     ],
     resize_keyboard=True
 )
@@ -58,12 +57,6 @@ async def start(message: types.Message, state: FSMContext):
     )
 
     await state.set_state(Form.wait_location)
-
-
-@router.message(F.text == "❌ Отмена")
-async def cancel(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Ты в главном меню 👇", reply_markup=main_keyboard)
 
 
 @router.message(Form.wait_location, F.location)
