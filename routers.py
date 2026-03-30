@@ -243,7 +243,7 @@ async def build_weather_text(lat: float, lng: float) -> str:
     )
 
 
-async def send_weather():
+async def daily_weather():
     """Отправляет погоду пользователям в их выбранное время"""
     now = datetime.now(ZoneInfo("Europe/Kyiv"))
     current_hour = now.hour
