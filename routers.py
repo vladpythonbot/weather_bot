@@ -241,37 +241,47 @@ async def build_weather_text(lat: float, lng: float) -> str:
         f"Рассвет в {sunrise_time.strftime("%H:%M")}\n"
         f"Закат в {sunset_time.strftime("%H:%M")}"
     )
-async def daily_weather():
+
+
+async def send_weather_to_users_by_time():
+    """Отправляет погоду пользователям в их выбранное время"""
     now = datetime.now(ZoneInfo("Europe/Kyiv"))
     current_hour = now.hour
     current_minute = now.minute
 
-    logger.info(f"Запуск ежедневной рассылки{current_hour:02d}:{current_minute:02d}")
+    logger.info(f"Проверка рассылки на {current_hour:02d}:{current_minute:02d}")
+
     try:
         async with aiosqlite.connect("reminders.db") as db:
-            cursor = await db.execute("SELECT user_id,lat,lng,hour,minute"
-                                   " FROM reminders WHERE hour=? AND minute=?",(current_hour,current_minute))
-            users_for_notify = await cursor.fetchall()
-        if not users_for_notify:
-            logger.info("Нет пользователей для рассылки")
+            cursor = await db.execute("""
+                SELECT user_id, lat, lng, hour, minute 
+                FROM reminders 
+                WHERE hour = ? AND minute = ?
+            """, (current_hour, current_minute))
+
+            users_to_notify = await cursor.fetchall()
+
+        if not users_to_notify:
             return
 
-        success=0
-        for user in users_for_notify:
-            user_id,lat,lng,hour,minute = user
+        success = 0
+        for user in users_to_notify:
+            user_id, lat, lng, hour, minute = user
+
             try:
-                text=await build_weather_text(lat,lng)
+                text = await build_weather_text(lat, lng)
                 if text:
                     await bot.send_message(
                         chat_id=user_id,
-                        text=f"Ваш ежедневный прогноз на {hour:02d}:{minute:02d}\n\n{text}",parse_mode="HTML")
-                    success+=1
+                        text=f"⏰ <b>Ваш ежедневный прогноз на {hour:02d}:{minute:02d}</b>\n\n{text}",
+                        parse_mode="HTML"
+                    )
+                    success += 1
                     logger.info(f"Прогноз отправлен пользователю {user_id}")
-
             except Exception as e:
-                logger.error(f"Ошибка отправки рассылки {user_id},{e}")
+                logger.error(f"Ошибка отправки пользователю {user_id}: {e}")
 
-        logger.info(f"Рассылка завершена.{success}/{len(users_for_notify)}")
+        logger.info(f"Рассылка завершена. Успешно отправлено: {success}/{len(users_to_notify)}")
 
     except Exception as e:
-        logger.error(f"Ошибка при начале рассылки: {e}", exc_info=True)
+        logger.error(f"Ошибка при выполнении рассылки: {e}", exc_info=True)
