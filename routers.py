@@ -86,10 +86,20 @@ async def get_location(message: types.Message, state: FSMContext):
 async def get_time(message: types.Message, state: FSMContext):
     try:
         hour, minute = map(int, message.text.split(":"))
-        if not (0 <= hour < 24 and 0 <= minute < 60):
-            raise ValueError
-    except:
-        await message.answer("❌ Введи время в формате ЧЧ:ММ")
+
+        if not (0 <= hour < 24):
+            raise ValueError("Неверный час")
+        if not (0 <= minute <=59):
+            raise ValueError("Минуты должны быть  от 0 до 59")
+        if minute % 5 !=0:
+            raise ValueError("Минуты должны быть кратны 5 (00, 05, 10, 15...)")
+    except ValueError as e:
+        error_text = str(e) if str(e) else "Неверный формат времени"
+        await message.answer(
+            f"❌ {error_text}\n\n"
+            f"Введите время в формате ЧЧ:ММ\n"
+            f"Минуты должны быть кратны 5.\n"
+            f"Примеры: 08:00, 08:05, 08:10, 21:30")
         return
 
     data = await state.get_data()
