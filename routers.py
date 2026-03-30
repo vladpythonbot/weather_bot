@@ -9,7 +9,6 @@ dotenv.load_dotenv()
 API_KEY = os.getenv("API_KEY")
 import aiosqlite
 from timezonefinder import TimezoneFinder
-import apscheduler.schedulers.asyncio
 from bot import bot
 from aiogram import Router, types, F
 from aiogram.filters import Command

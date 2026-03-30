@@ -2,6 +2,8 @@
 import asyncio
 import logging
 
+from apscheduler.triggers.cron import CronTrigger
+
 from bot import bot, dp
 from routers import router,daily_weather
 from db import init_db
@@ -25,10 +27,10 @@ async def main():
     scheduler = AsyncIOScheduler(timezone="Europe/Kyiv")
 
     scheduler.add_job(daily_weather, # вызов функции из роутера
-        "interval",
-        minutes=1,
-        id="daily_weather_by_time",
-        replace_existing=True)
+    CronTrigger(minute="*/5"),
+    id="daily_weather",
+    replace_existing=True,
+    timezone="Europe/Kyiv")
 
     logger.info("Планировщик запущен — проверка времени рассылки каждую минуту")
     scheduler.start()
