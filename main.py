@@ -34,7 +34,6 @@ async def main():
 
     logger.info("Планировщик запущен — проверка времени рассылки каждую минуту")
     scheduler.start()
-    await asyncio.sleep(5)
     print("Бот запущен")
     await dp.start_polling(bot)
 
