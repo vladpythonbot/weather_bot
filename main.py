@@ -9,7 +9,7 @@ from routers import router,daily_weather
 from db import init_db
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -34,6 +34,7 @@ async def main():
 
     logger.info("Планировщик запущен — проверка времени рассылки каждую минуту")
     scheduler.start()
+    await asyncio.sleep(5)
     print("Бот запущен")
     await dp.start_polling(bot)
 
