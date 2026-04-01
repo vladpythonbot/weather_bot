@@ -29,8 +29,7 @@ async def main():
     scheduler.add_job(daily_weather, # вызов функции из роутера
     CronTrigger(minute="*/5"),
     id="daily_weather",
-    replace_existing=True,
-    timezone="Europe/Kyiv")
+    replace_existing=True,)
 
     logger.info("Планировщик запущен — проверка времени рассылки каждую минуту")
     scheduler.start()
