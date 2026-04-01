@@ -249,7 +249,7 @@ async def daily_weather():
     current_hour = now.hour
     current_minute = now.minute
 
-    logger.info(f"Проверка рассылки на {current_hour:02d}:{current_minute:02d}")
+    logger.info(f"Проверка рассылки на {current_hour:02d}:{current_minute:02d} (Киев)")
 
     try:
         async with aiosqlite.connect("reminders.db") as db:
@@ -260,6 +260,9 @@ async def daily_weather():
             """, (current_hour, current_minute))
 
             users_to_notify = await cursor.fetchall()
+            if not users_to_notify:
+                logger.debug("На это время нет рассылки")
+                return 
 
         if not users_to_notify:
             return
