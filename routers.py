@@ -18,6 +18,12 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemo
 
 from db import save_location, get_user_location, get_reminder
 
+daily_logger = logging.getLogger("daily_weather")
+daily_logger.setLevel(logging.DEBUG)
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"))
+daily_logger.addHandler(handler)
+
 router = Router()
 tf = TimezoneFinder()
 logger = logging.getLogger(__name__)
@@ -260,11 +266,9 @@ async def daily_weather():
             """, (current_hour, current_minute))
 
             users_to_notify = await cursor.fetchall()
-            if not users_to_notify:
-                logger.debug("На это время нет рассылки")
-                return 
 
         if not users_to_notify:
+            logger.debug("На это время нет пользователей для рассылки")
             return
 
         success = 0
@@ -281,6 +285,8 @@ async def daily_weather():
                     )
                     success += 1
                     logger.info(f"Прогноз отправлен пользователю {user_id}")
+                else:
+                    logger.warning(f"Не удалось получить погоду для пользователя {user_id}")
             except Exception as e:
                 logger.error(f"Ошибка отправки пользователю {user_id}: {e}")
 

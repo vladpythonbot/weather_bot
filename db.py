@@ -4,15 +4,8 @@ import aiosqlite
 DB_NAME = "reminders.db"
 
 async def init_db():
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS reminders (
-                user_id INTEGER PRIMARY KEY,
-                lat REAL NOT NULL,
-                lng REAL NOT NULL,
-                hour INTEGER NOT NULL,
-                minute INTEGER NOT NULL
-            )
+    async with aiosqlite.connect("reminders.db") as db:
+        await db.execute("""DROP TABLE IF EXISTS reminders
         """)
         await db.commit()
     print(f"Таблица 'reminders' готова в файле {DB_NAME}")
