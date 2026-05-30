@@ -19,35 +19,43 @@ logger = logging.getLogger(__name__)
 
 
 async def main():
+    scheduler = None
+
     try:
-        me = await bot.get_me()
-    except TelegramUnauthorizedError as exc:
-        logger.error(
-            "Telegram отклонил BOT_TOKEN. Проверь переменную BOT_TOKEN на Railway: "
-            "токен мог быть отозван через BotFather или скопирован не полностью."
+        try:
+            me = await bot.get_me()
+        except TelegramUnauthorizedError as exc:
+            logger.error(
+                "Telegram отклонил BOT_TOKEN. Проверь переменную BOT_TOKEN на Railway: "
+                "токен мог быть отозван через BotFather, скопирован не полностью "
+                "или Railway запустился со старым значением переменной."
+            )
+            raise SystemExit(1) from exc
+
+        logger.info("Токен проверен: @%s", me.username)
+
+        await init_db()
+        logger.info("База данных инициализирована")
+
+        dp.include_router(router)
+
+        scheduler = AsyncIOScheduler(timezone="Europe/Kyiv")
+        scheduler.add_job(
+            daily_weather,
+            CronTrigger(minute="*/5"),
+            id="daily_weather",
+            replace_existing=True,
         )
-        raise SystemExit(1) from exc
 
-    logger.info("Токен проверен: @%s", me.username)
+        scheduler.start()
+        logger.info("Планировщик запущен: проверка рассылки каждые 5 минут")
+        logger.info("Бот запущен")
 
-    await init_db()
-    logger.info("База данных инициализирована")
-
-    dp.include_router(router)
-
-    scheduler = AsyncIOScheduler(timezone="Europe/Kyiv")
-    scheduler.add_job(
-        daily_weather,
-        CronTrigger(minute="*/5"),
-        id="daily_weather",
-        replace_existing=True,
-    )
-
-    scheduler.start()
-    logger.info("Планировщик запущен: проверка рассылки каждые 5 минут")
-    logger.info("Бот запущен")
-
-    await dp.start_polling(bot)
+        await dp.start_polling(bot)
+    finally:
+        if scheduler and scheduler.running:
+            scheduler.shutdown(wait=False)
+        await bot.session.close()
 
 
 if __name__ == "__main__":
