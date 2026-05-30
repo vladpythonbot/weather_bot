@@ -1,6 +1,7 @@
 import logging
 import os
-from datetime import datetime
+from collections import Counter
+from datetime import datetime, timedelta
 from html import escape
 from zoneinfo import ZoneInfo
 
@@ -10,11 +11,25 @@ from aiogram import F, Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 from timezonefinder import TimezoneFinder
 
 from bot import bot
-from db import Reminder, get_all_reminders, get_reminder, get_user_location, save_reminder
+from db import (
+    Reminder,
+    get_all_reminders,
+    get_reminder,
+    get_user_location,
+    save_reminder,
+    update_preferences,
+    update_sunrise_alarm,
+)
 
 dotenv.load_dotenv()
 API_KEY = (os.getenv("API_KEY") or "").strip()
@@ -23,10 +38,12 @@ router = Router()
 logger = logging.getLogger(__name__)
 tf = TimezoneFinder()
 
-BTN_WEATHER_NOW = "🌤 Погода сейчас"
-BTN_CHANGE_LOCATION = "📍 Изменить место"
-BTN_CHANGE_TIME = "⏰ Изменить время"
-BTN_SETTINGS = "📋 Настройки"
+BTN_WEATHER_NOW = "🌤 Сейчас"
+BTN_DAY_FORECAST = "🌦 День"
+BTN_GO_OUT = "🚶 Перед выходом"
+BTN_CHANGE_LOCATION = "📍 Место"
+BTN_CHANGE_TIME = "⏰ Время"
+BTN_SETTINGS = "⚙️ Настройки"
 BTN_SEND_LOCATION = "📍 Отправить геолокацию"
 
 
@@ -38,7 +55,8 @@ class Form(StatesGroup):
 
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text=BTN_WEATHER_NOW)],
+        [KeyboardButton(text=BTN_WEATHER_NOW), KeyboardButton(text=BTN_DAY_FORECAST)],
+        [KeyboardButton(text=BTN_GO_OUT)],
         [KeyboardButton(text=BTN_CHANGE_LOCATION), KeyboardButton(text=BTN_CHANGE_TIME)],
         [KeyboardButton(text=BTN_SETTINGS)],
     ],
@@ -86,30 +104,77 @@ def local_now_for_location(lat: float, lng: float) -> datetime:
     return datetime.now(ZoneInfo(timezone_for_location(lat, lng)))
 
 
+def wind_text(speed_ms: float, wind_unit: str) -> str:
+    if wind_unit == "kmh":
+        return f"{speed_ms * 3.6:.0f} км/ч"
+
+    return f"{speed_ms:.1f} м/с"
+
+
+def city_text(data: dict) -> str:
+    name = data.get("name")
+    country = data.get("sys", {}).get("country")
+
+    if name and country:
+        return f"{name}, {country}"
+    if name:
+        return name
+    return "текущее место"
+
+
 def weather_advice(temp: float, desc: str, wind: float) -> str:
     desc_lower = desc.lower()
 
     if "дожд" in desc_lower:
-        return "Возьми зонт или накинь что-то непромокаемое."
+        return "Возьми зонт или непромокаемый слой."
     if "снег" in desc_lower:
-        return "Обувь с нормальной подошвой сегодня будет кстати."
+        return "Лучше выбрать тёплую обувь с нормальной подошвой."
     if wind >= 9:
-        return "Ветер заметный, лучше одеться чуть теплее."
+        return "Ветер заметный. Капюшон или плотный верх пригодятся."
     if temp <= 0:
-        return "Холодно. Перчатки и шапка не будут лишними."
+        return "Холодно. Шапка и перчатки будут к месту."
     if temp < 8:
-        return "Прохладно. Лучше взять тёплый слой."
+        return "Прохладно. Возьми тёплый слой."
     if temp >= 28:
-        return "Жарко. Вода и лёгкая одежда спасут день."
-    return "Погода без крайностей. Одевайся по ощущениям."
+        return "Жарко. Лёгкая одежда и вода — хорошая идея."
+    if temp >= 20:
+        return "Комфортно. Можно одеться легко, но проверь ветер."
+    return "Погода спокойная. Одевайся по ощущениям."
 
 
-async def fetch_weather(lat: float, lng: float) -> dict | None:
+def go_out_advice(temp: float, desc: str, wind: float, pop: float | None = None) -> str:
+    tips = []
+    desc_lower = desc.lower()
+
+    if pop is not None and pop >= 0.45:
+        tips.append("зонт")
+    elif "дожд" in desc_lower:
+        tips.append("зонт")
+
+    if temp <= 0:
+        tips.extend(["тёплая куртка", "шапка"])
+    elif temp < 8:
+        tips.append("тёплый слой")
+    elif temp < 16:
+        tips.append("лёгкая куртка")
+    elif temp >= 28:
+        tips.extend(["вода", "лёгкая одежда"])
+
+    if wind >= 9:
+        tips.append("защита от ветра")
+
+    if not tips:
+        return "Можно выходить без особой подготовки."
+
+    return "Перед выходом: " + ", ".join(dict.fromkeys(tips)) + "."
+
+
+async def fetch_openweather(endpoint: str, lat: float, lng: float) -> dict | None:
     if not API_KEY:
         logger.error("API_KEY не найден")
         return None
 
-    url = "https://api.openweathermap.org/data/2.5/weather"
+    url = f"https://api.openweathermap.org/data/2.5/{endpoint}"
     params = {
         "lat": lat,
         "lon": lng,
@@ -126,49 +191,230 @@ async def fetch_weather(lat: float, lng: float) -> dict | None:
         logger.error("Ошибка запроса OpenWeatherMap: %s", e)
         return None
 
-    if str(data.get("cod")) != "200":
+    if str(data.get("cod")) not in {"200", "2xx"}:
         logger.error("OpenWeatherMap вернул ошибку: %s", data)
         return None
 
     return data
 
 
-async def build_weather_text(lat: float, lng: float) -> str:
-    data = await fetch_weather(lat, lng)
+async def fetch_weather(lat: float, lng: float) -> dict | None:
+    return await fetch_openweather("weather", lat, lng)
+
+
+async def fetch_forecast(lat: float, lng: float) -> dict | None:
+    return await fetch_openweather("forecast", lat, lng)
+
+
+def forecast_items_for_today(data: dict, lat: float, lng: float) -> list[dict]:
+    tz = ZoneInfo(timezone_for_location(lat, lng))
+    today = datetime.now(tz).date()
+    items = []
+
+    for item in data.get("list", []):
+        forecast_time = datetime.fromtimestamp(item["dt"], tz=tz)
+        if forecast_time.date() == today:
+            items.append(item | {"local_time": forecast_time})
+
+    return items or [(item | {"local_time": datetime.fromtimestamp(item["dt"], tz=tz)}) for item in data.get("list", [])[:5]]
+
+
+def period_name(hour: int) -> str:
+    if 6 <= hour < 12:
+        return "Утро"
+    if 12 <= hour < 18:
+        return "День"
+    if 18 <= hour < 24:
+        return "Вечер"
+    return "Ночь"
+
+
+def summarize_period(items: list[dict], wind_unit: str) -> str:
+    temps = [item["main"]["temp"] for item in items]
+    feels = [item["main"]["feels_like"] for item in items]
+    winds = [item["wind"]["speed"] for item in items]
+    descriptions = [item["weather"][0]["description"] for item in items]
+    pop = max((item.get("pop", 0) for item in items), default=0)
+
+    avg_temp = sum(temps) / len(temps)
+    avg_feels = sum(feels) / len(feels)
+    max_wind = max(winds)
+    desc = Counter(descriptions).most_common(1)[0][0]
+    rain = f", дождь {round(pop * 100)}%" if pop >= 0.2 else ""
+
+    return (
+        f"<b>{escape(period_name(items[0]['local_time'].hour))}</b>: "
+        f"{avg_temp:.0f}°C, ощущается {avg_feels:.0f}°C, "
+        f"{escape(desc)}{rain}, ветер {wind_text(max_wind, wind_unit)}"
+    )
+
+
+def forecast_city_text(data: dict) -> str:
+    city = data.get("city", {})
+    name = city.get("name")
+    country = city.get("country")
+
+    if name and country:
+        return f"{name}, {country}"
+    if name:
+        return name
+    return "текущее место"
+
+
+def details_text(data: dict, reminder: Reminder) -> str:
+    if not reminder.show_details:
+        return ""
+
+    humidity = data["main"].get("humidity")
+    pressure = data["main"].get("pressure")
+    parts = []
+
+    if humidity is not None:
+        parts.append(f"Влажность: {humidity}%")
+    if pressure:
+        parts.append(f"Давление: {pressure} гПа")
+
+    return "\n".join(parts) + ("\n" if parts else "")
+
+
+async def build_weather_text(reminder: Reminder) -> str:
+    data = await fetch_weather(reminder.lat, reminder.lng)
     if not data:
         return "❌ Не удалось получить погоду. Проверь API_KEY или попробуй позже."
 
     temp = data["main"]["temp"]
     feels_like = data["main"]["feels_like"]
-    humidity = data["main"].get("humidity")
-    pressure = data["main"].get("pressure")
     desc = data["weather"][0]["description"]
     wind = data["wind"]["speed"]
     sunrise_ts = data["sys"]["sunrise"]
     sunset_ts = data["sys"]["sunset"]
 
-    tz_name = timezone_for_location(lat, lng)
-    tz = ZoneInfo(tz_name)
+    tz = ZoneInfo(timezone_for_location(reminder.lat, reminder.lng))
     local_time = datetime.now(tz)
     sunrise_time = datetime.fromtimestamp(sunrise_ts, tz=tz)
     sunset_time = datetime.fromtimestamp(sunset_ts, tz=tz)
 
-    pressure_text = f"\nДавление: {pressure} гПа" if pressure else ""
-    humidity_text = f"\nВлажность: {humidity}%" if humidity is not None else ""
-
     return (
-        "🌤 <b>Погода сейчас</b>\n"
+        f"🌤 <b>Погода сейчас · {escape(city_text(data))}</b>\n"
         f"🕒 Местное время: <b>{local_time.strftime('%H:%M')}</b>\n\n"
         f"🌡 Температура: <b>{temp:.1f}°C</b>\n"
         f"🤔 Ощущается: <b>{feels_like:.1f}°C</b>\n"
         f"☁️ {escape(desc.capitalize())}\n"
-        f"💨 Ветер: <b>{wind:.1f} м/с</b>"
-        f"{humidity_text}"
-        f"{pressure_text}\n\n"
+        f"💨 Ветер: <b>{wind_text(wind, reminder.wind_unit)}</b>\n"
+        f"{details_text(data, reminder)}\n"
         f"🌅 Рассвет: {sunrise_time.strftime('%H:%M')}\n"
         f"🌇 Закат: {sunset_time.strftime('%H:%M')}\n\n"
         f"💡 {weather_advice(temp, desc, wind)}"
     )
+
+
+async def build_day_forecast_text(reminder: Reminder) -> str:
+    data = await fetch_forecast(reminder.lat, reminder.lng)
+    if not data:
+        return "❌ Не удалось получить прогноз на день. Попробуй позже."
+
+    items = forecast_items_for_today(data, reminder.lat, reminder.lng)
+    grouped: dict[str, list[dict]] = {}
+
+    for item in items:
+        grouped.setdefault(period_name(item["local_time"].hour), []).append(item)
+
+    ordered_periods = ["Утро", "День", "Вечер", "Ночь"]
+    lines = [
+        f"🌦 <b>Прогноз на день · {escape(forecast_city_text(data))}</b>",
+        "",
+    ]
+
+    for period in ordered_periods:
+        if period in grouped:
+            lines.append(summarize_period(grouped[period], reminder.wind_unit))
+
+    hottest = max(items, key=lambda item: item["main"]["temp"])
+    coldest = min(items, key=lambda item: item["main"]["temp"])
+    max_pop = max((item.get("pop", 0) for item in items), default=0)
+
+    lines.extend([
+        "",
+        f"Максимум: <b>{hottest['main']['temp']:.0f}°C</b>",
+        f"Минимум: <b>{coldest['main']['temp']:.0f}°C</b>",
+    ])
+
+    if max_pop >= 0.2:
+        lines.append(f"Вероятность дождя: <b>{round(max_pop * 100)}%</b>")
+
+    avg_temp = sum(item["main"]["temp"] for item in items) / len(items)
+    max_wind = max(item["wind"]["speed"] for item in items)
+    desc = Counter(item["weather"][0]["description"] for item in items).most_common(1)[0][0]
+    lines.append("")
+    lines.append(f"💡 {go_out_advice(avg_temp, desc, max_wind, max_pop)}")
+
+    return "\n".join(lines)
+
+
+async def build_go_out_text(reminder: Reminder) -> str:
+    data = await fetch_forecast(reminder.lat, reminder.lng)
+    if not data:
+        weather = await fetch_weather(reminder.lat, reminder.lng)
+        if not weather:
+            return "❌ Не удалось получить прогноз перед выходом. Попробуй позже."
+
+        return (
+            f"🚶 <b>Перед выходом · {escape(city_text(weather))}</b>\n\n"
+            f"Сейчас {weather['main']['temp']:.1f}°C, {escape(weather['weather'][0]['description'])}.\n"
+            f"💡 {go_out_advice(weather['main']['temp'], weather['weather'][0]['description'], weather['wind']['speed'])}"
+        )
+
+    items = forecast_items_for_today(data, reminder.lat, reminder.lng)[:3]
+    first = items[0]
+    temp = first["main"]["temp"]
+    feels = first["main"]["feels_like"]
+    desc = first["weather"][0]["description"]
+    wind = first["wind"]["speed"]
+    pop = max((item.get("pop", 0) for item in items), default=0)
+    time_range = f"{items[0]['local_time'].strftime('%H:%M')}–{items[-1]['local_time'].strftime('%H:%M')}"
+
+    return (
+        f"🚶 <b>Перед выходом · {escape(forecast_city_text(data))}</b>\n\n"
+        f"Ближайшие часы: <b>{time_range}</b>\n"
+        f"🌡 {temp:.1f}°C, ощущается {feels:.1f}°C\n"
+        f"☁️ {escape(desc.capitalize())}\n"
+        f"💨 Ветер: {wind_text(wind, reminder.wind_unit)}\n"
+        f"Дождь: {round(pop * 100)}%\n\n"
+        f"💡 {go_out_advice(temp, desc, wind, pop)}"
+    )
+
+
+async def sunrise_alarm_payload(reminder: Reminder) -> tuple[str, str] | None:
+    data = await fetch_weather(reminder.lat, reminder.lng)
+    if not data:
+        return None
+
+    tz = ZoneInfo(timezone_for_location(reminder.lat, reminder.lng))
+    local_now = datetime.now(tz)
+    sunrise_time = datetime.fromtimestamp(data["sys"]["sunrise"], tz=tz)
+    alarm_time = sunrise_time - timedelta(minutes=reminder.sunrise_alarm_offset)
+    alarm_date = alarm_time.strftime("%Y-%m-%d")
+
+    if reminder.sunrise_alarm_last_date == alarm_date:
+        return None
+
+    seconds_after_alarm = (local_now - alarm_time).total_seconds()
+    if not (0 <= seconds_after_alarm < 5 * 60):
+        return None
+
+    temp = data["main"]["temp"]
+    desc = data["weather"][0]["description"]
+    city = city_text(data)
+
+    text = (
+        "WAKE_ALARM\n\n"
+        f"🌅 <b>Рассветный будильник · {escape(city)}</b>\n\n"
+        f"Рассвет: <b>{sunrise_time.strftime('%H:%M')}</b>\n"
+        f"Сигнал: <b>{alarm_time.strftime('%H:%M')}</b>\n"
+        f"Сейчас: <b>{temp:.1f}°C</b>, {escape(desc)}\n\n"
+        "Открой шторы и встань на ноги. Остальное потом."
+    )
+    return alarm_date, text
 
 
 async def ask_for_location(message: types.Message, state: FSMContext):
@@ -179,6 +425,15 @@ async def ask_for_location(message: types.Message, state: FSMContext):
     await state.set_state(Form.wait_location)
 
 
+async def get_or_ask_reminder(message: types.Message, state: FSMContext) -> Reminder | None:
+    reminder = await get_reminder(message.from_user.id)
+    if reminder:
+        return reminder
+
+    await ask_for_location(message, state)
+    return None
+
+
 @router.message(Command("start"))
 async def start(message: types.Message, state: FSMContext):
     reminder = await get_reminder(message.from_user.id)
@@ -187,14 +442,14 @@ async def start(message: types.Message, state: FSMContext):
     if reminder:
         await message.answer(
             f"👋 Привет, {escape(name)}.\n\n"
-            "Я уже помню твои настройки. Можешь посмотреть погоду сейчас или изменить время рассылки.",
+            "Я уже помню твои настройки. Можешь посмотреть погоду, прогноз на день или подсказку перед выходом.",
             reply_markup=main_keyboard,
         )
         return
 
     await message.answer(
         f"👋 Привет, {escape(name)}.\n\n"
-        "Я буду показывать погоду и присылать ежедневный прогноз в выбранное время.",
+        "Я буду показывать погоду и присылать прогноз перед выходом в выбранное время.",
         reply_markup=ReplyKeyboardRemove(),
     )
     await ask_for_location(message, state)
@@ -204,6 +459,30 @@ async def start(message: types.Message, state: FSMContext):
 async def handle_location(message: types.Message, state: FSMContext):
     lat = message.location.latitude
     lng = message.location.longitude
+    reminder = await get_reminder(message.from_user.id)
+
+    if reminder:
+        await save_reminder(
+            message.from_user.id,
+            lat,
+            lng,
+            reminder.hour,
+            reminder.minute,
+            wind_unit=reminder.wind_unit,
+            show_details=reminder.show_details,
+        )
+        await state.clear()
+        updated = await get_reminder(message.from_user.id)
+
+        await message.answer(
+            f"✅ Место обновлено. Время прогноза осталось прежним: "
+            f"<b>{reminder.hour:02d}:{reminder.minute:02d}</b>.",
+            parse_mode="HTML",
+            reply_markup=main_keyboard,
+        )
+        await message.answer(await build_weather_text(updated), parse_mode="HTML")
+        return
+
     await state.update_data(lat=lat, lng=lng)
 
     await message.answer(
@@ -233,25 +512,42 @@ async def handle_time(message: types.Message, state: FSMContext):
 
     await save_reminder(message.from_user.id, lat, lng, hour, minute)
     await state.clear()
+    reminder = await get_reminder(message.from_user.id)
 
     await message.answer(
-        f"✅ Готово. Буду присылать прогноз в <b>{hour:02d}:{minute:02d}</b> по местному времени.",
+        f"✅ Готово. Буду присылать прогноз перед выходом в "
+        f"<b>{hour:02d}:{minute:02d}</b> по местному времени.",
         parse_mode="HTML",
         reply_markup=main_keyboard,
     )
-
-    await message.answer(await build_weather_text(lat, lng), parse_mode="HTML")
+    await message.answer(await build_weather_text(reminder), parse_mode="HTML")
 
 
 @router.message(F.text == BTN_WEATHER_NOW)
 async def weather_now(message: types.Message, state: FSMContext):
-    lat, lng = await get_user_location(message.from_user.id)
-
-    if lat is None or lng is None:
-        await ask_for_location(message, state)
+    reminder = await get_or_ask_reminder(message, state)
+    if not reminder:
         return
 
-    await message.answer(await build_weather_text(lat, lng), parse_mode="HTML")
+    await message.answer(await build_weather_text(reminder), parse_mode="HTML")
+
+
+@router.message(F.text == BTN_DAY_FORECAST)
+async def day_forecast(message: types.Message, state: FSMContext):
+    reminder = await get_or_ask_reminder(message, state)
+    if not reminder:
+        return
+
+    await message.answer(await build_day_forecast_text(reminder), parse_mode="HTML")
+
+
+@router.message(F.text == BTN_GO_OUT)
+async def go_out_forecast(message: types.Message, state: FSMContext):
+    reminder = await get_or_ask_reminder(message, state)
+    if not reminder:
+        return
+
+    await message.answer(await build_go_out_text(reminder), parse_mode="HTML")
 
 
 @router.message(F.text == BTN_CHANGE_LOCATION)
@@ -261,23 +557,102 @@ async def change_location(message: types.Message, state: FSMContext):
 
 @router.message(F.text == BTN_SETTINGS)
 async def my_settings(message: types.Message):
-    reminder = await get_reminder(message.from_user.id)
+    await show_settings(message, message.from_user.id)
+
+
+async def show_settings(obj: types.Message | types.CallbackQuery, user_id: int):
+    reminder = await get_reminder(user_id)
 
     if not reminder:
-        await message.answer("Настроек пока нет. Нажми /start и отправь геолокацию.")
+        text = "Настроек пока нет. Нажми /start и отправь геолокацию."
+        if isinstance(obj, types.CallbackQuery):
+            await obj.message.edit_text(text)
+            await obj.answer()
+        else:
+            await obj.answer(text)
         return
 
     tz_name = timezone_for_location(reminder.lat, reminder.lng)
     local_time = local_now_for_location(reminder.lat, reminder.lng)
+    wind_label = "км/ч" if reminder.wind_unit == "kmh" else "м/с"
+    details_label = "включены" if reminder.show_details else "скрыты"
+    alarm_label = "включён" if reminder.sunrise_alarm_enabled else "выключен"
 
-    await message.answer(
-        "📋 <b>Настройки</b>\n\n"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"Ветер: {wind_label}", callback_data="toggle_wind_unit")],
+        [InlineKeyboardButton(text=f"Детали: {details_label}", callback_data="toggle_details")],
+        [InlineKeyboardButton(text=f"🌅 Будильник: {alarm_label}", callback_data="toggle_sunrise_alarm")],
+        [
+            InlineKeyboardButton(text="За 0 мин", callback_data="sunrise_offset_0"),
+            InlineKeyboardButton(text="За 10 мин", callback_data="sunrise_offset_10"),
+            InlineKeyboardButton(text="За 20 мин", callback_data="sunrise_offset_20"),
+        ],
+    ])
+
+    text = (
+        "⚙️ <b>Настройки</b>\n\n"
         f"📍 Координаты: <b>{reminder.lat:.3f}, {reminder.lng:.3f}</b>\n"
         f"🌍 Часовой пояс: <b>{escape(tz_name)}</b>\n"
         f"🕒 Сейчас там: <b>{local_time.strftime('%H:%M')}</b>\n"
-        f"⏰ Рассылка: <b>{reminder.hour:02d}:{reminder.minute:02d}</b>",
-        parse_mode="HTML",
+        f"⏰ Прогноз перед выходом: <b>{reminder.hour:02d}:{reminder.minute:02d}</b>\n"
+        f"💨 Ветер: <b>{wind_label}</b>\n"
+        f"📎 Влажность/давление: <b>{details_label}</b>\n"
+        f"🌅 Рассветный будильник: <b>{alarm_label}</b>\n"
+        f"🔔 Сигнал: <b>за {reminder.sunrise_alarm_offset} мин до рассвета</b>\n\n"
+        "<i>Для громкого звука настрой MacroDroid на уведомление с текстом WAKE_ALARM.</i>"
     )
+
+    if isinstance(obj, types.CallbackQuery):
+        await obj.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await obj.answer()
+    else:
+        await obj.answer(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+@router.callback_query(F.data == "toggle_wind_unit")
+async def toggle_wind_unit(callback: types.CallbackQuery):
+    reminder = await get_reminder(callback.from_user.id)
+    if not reminder:
+        await callback.answer("Сначала настрой бота", show_alert=True)
+        return
+
+    new_unit = "kmh" if reminder.wind_unit == "ms" else "ms"
+    await update_preferences(callback.from_user.id, wind_unit=new_unit)
+    await show_settings(callback, callback.from_user.id)
+
+
+@router.callback_query(F.data == "toggle_details")
+async def toggle_details(callback: types.CallbackQuery):
+    reminder = await get_reminder(callback.from_user.id)
+    if not reminder:
+        await callback.answer("Сначала настрой бота", show_alert=True)
+        return
+
+    await update_preferences(callback.from_user.id, show_details=not reminder.show_details)
+    await show_settings(callback, callback.from_user.id)
+
+
+@router.callback_query(F.data == "toggle_sunrise_alarm")
+async def toggle_sunrise_alarm(callback: types.CallbackQuery):
+    reminder = await get_reminder(callback.from_user.id)
+    if not reminder:
+        await callback.answer("Сначала настрой бота", show_alert=True)
+        return
+
+    await update_sunrise_alarm(callback.from_user.id, enabled=not reminder.sunrise_alarm_enabled)
+    await show_settings(callback, callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("sunrise_offset_"))
+async def set_sunrise_offset(callback: types.CallbackQuery):
+    reminder = await get_reminder(callback.from_user.id)
+    if not reminder:
+        await callback.answer("Сначала настрой бота", show_alert=True)
+        return
+
+    offset = int(callback.data.split("_")[-1])
+    await update_sunrise_alarm(callback.from_user.id, enabled=True, offset=offset)
+    await show_settings(callback, callback.from_user.id)
 
 
 @router.message(F.text == BTN_CHANGE_TIME)
@@ -289,7 +664,7 @@ async def change_time(message: types.Message, state: FSMContext):
         return
 
     await message.answer(
-        f"Текущее время рассылки: <b>{reminder.hour:02d}:{reminder.minute:02d}</b>\n\n"
+        f"Текущее время прогноза перед выходом: <b>{reminder.hour:02d}:{reminder.minute:02d}</b>\n\n"
         + time_help_text(),
         parse_mode="HTML",
     )
@@ -310,11 +685,19 @@ async def process_new_time(message: types.Message, state: FSMContext):
         return
 
     hour, minute = parsed
-    await save_reminder(message.from_user.id, reminder.lat, reminder.lng, hour, minute)
+    await save_reminder(
+        message.from_user.id,
+        reminder.lat,
+        reminder.lng,
+        hour,
+        minute,
+        wind_unit=reminder.wind_unit,
+        show_details=reminder.show_details,
+    )
     await state.clear()
 
     await message.answer(
-        f"✅ Новое время рассылки: <b>{hour:02d}:{minute:02d}</b>",
+        f"✅ Новое время прогноза перед выходом: <b>{hour:02d}:{minute:02d}</b>",
         parse_mode="HTML",
         reply_markup=main_keyboard,
     )
@@ -333,27 +716,52 @@ async def daily_weather():
         reminders = await get_all_reminders()
         users_to_notify = [reminder for reminder in reminders if await should_notify_now(reminder)]
 
+        success = 0
         if not users_to_notify:
             logger.debug("На это время нет пользователей для рассылки")
-            return
+        else:
+            for reminder in users_to_notify:
+                try:
+                    text = await build_go_out_text(reminder)
+                    await bot.send_message(
+                        chat_id=reminder.user_id,
+                        text=(
+                            f"⏰ <b>Прогноз перед выходом на {reminder.hour:02d}:{reminder.minute:02d}</b>\n\n"
+                            f"{text}"
+                        ),
+                        parse_mode="HTML",
+                    )
+                    success += 1
+                    logger.info("Прогноз отправлен пользователю %s", reminder.user_id)
+                except Exception as e:
+                    logger.error("Ошибка отправки пользователю %s: %s", reminder.user_id, e)
 
-        success = 0
-        for reminder in users_to_notify:
+            logger.info("Рассылка завершена: %s/%s", success, len(users_to_notify))
+
+        alarm_success = 0
+        for reminder in reminders:
+            if not reminder.sunrise_alarm_enabled:
+                continue
+
             try:
-                text = await build_weather_text(reminder.lat, reminder.lng)
+                payload = await sunrise_alarm_payload(reminder)
+                if not payload:
+                    continue
+
+                alarm_date, text = payload
                 await bot.send_message(
                     chat_id=reminder.user_id,
-                    text=(
-                        f"⏰ <b>Ежедневный прогноз на {reminder.hour:02d}:{reminder.minute:02d}</b>\n\n"
-                        f"{text}"
-                    ),
+                    text=text,
                     parse_mode="HTML",
+                    disable_notification=False,
                 )
-                success += 1
-                logger.info("Прогноз отправлен пользователю %s", reminder.user_id)
+                await update_sunrise_alarm(reminder.user_id, last_date=alarm_date)
+                alarm_success += 1
+                logger.info("Рассветный будильник отправлен пользователю %s", reminder.user_id)
             except Exception as e:
-                logger.error("Ошибка отправки пользователю %s: %s", reminder.user_id, e)
+                logger.error("Ошибка рассветного будильника для %s: %s", reminder.user_id, e)
 
-        logger.info("Рассылка завершена: %s/%s", success, len(users_to_notify))
+        if alarm_success:
+            logger.info("Рассветных будильников отправлено: %s", alarm_success)
     except Exception as e:
         logger.error("Ошибка при выполнении рассылки: %s", e, exc_info=True)
