@@ -1,33 +1,33 @@
-import aiohttp
 import logging
+import os
 from datetime import datetime
 from html import escape
 from zoneinfo import ZoneInfo
 
+import aiohttp
 import dotenv
-import os
-dotenv.load_dotenv()
-API_KEY = os.getenv("API_KEY")
-from timezonefinder import TimezoneFinder
-from bot import bot
-from aiogram import Router, types, F
+from aiogram import F, Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from timezonefinder import TimezoneFinder
 
-from db import save_location, get_user_location, get_reminder, get_all_reminders
+from bot import bot
+from db import Reminder, get_all_reminders, get_reminder, get_user_location, save_reminder
 
-daily_logger = logging.getLogger("daily_weather")
-daily_logger.setLevel(logging.DEBUG)
-handler = logging.StreamHandler()
-handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"))
-if not daily_logger.handlers:
-    daily_logger.addHandler(handler)
+dotenv.load_dotenv()
+API_KEY = (os.getenv("API_KEY") or "").strip()
 
 router = Router()
-tf = TimezoneFinder()
 logger = logging.getLogger(__name__)
+tf = TimezoneFinder()
+
+BTN_WEATHER_NOW = "🌤 Погода сейчас"
+BTN_CHANGE_LOCATION = "📍 Изменить место"
+BTN_CHANGE_TIME = "⏰ Изменить время"
+BTN_SETTINGS = "📋 Настройки"
+BTN_SEND_LOCATION = "📍 Отправить геолокацию"
 
 
 class Form(StatesGroup):
@@ -38,267 +38,322 @@ class Form(StatesGroup):
 
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="🌤 Погода сейчас")],
-        [KeyboardButton(text="📍 Изменить местоположение"),
-         KeyboardButton(text="⏰ Изменить время")],
-        [KeyboardButton(text="📋 Мои настройки")]
+        [KeyboardButton(text=BTN_WEATHER_NOW)],
+        [KeyboardButton(text=BTN_CHANGE_LOCATION), KeyboardButton(text=BTN_CHANGE_TIME)],
+        [KeyboardButton(text=BTN_SETTINGS)],
     ],
-    resize_keyboard=True
-)
-
-user_location_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="📍 Отправить геолокацию", request_location=True)]],
     resize_keyboard=True,
-    one_time_keyboard=True
 )
 
-@router.message(Command("start"))
-async def start(message: types.Message, state: FSMContext):
-    name = message.from_user.first_name or "друг"
-
-    await message.answer(
-        f"👋 Привет, {name}!\n\n"
-        f"Я бот погоды ☀️\n"
-        f"Отправь геолокацию 👇",
-        reply_markup=user_location_kb
-    )
-
-    await state.set_state(Form.wait_location)
+location_keyboard = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text=BTN_SEND_LOCATION, request_location=True)]],
+    resize_keyboard=True,
+    one_time_keyboard=True,
+)
 
 
-@router.message(Form.wait_location, F.location)
-async def get_location(message: types.Message, state: FSMContext):
-    lat = message.location.latitude
-    lng = message.location.longitude
+def parse_time(text: str | None) -> tuple[int, int] | None:
+    if not text:
+        return None
 
-    await state.update_data(lat=lat, lng=lng)
-
-    await message.answer(
-        "📍 Геолокация получена\n"
-        "Введи время ЧЧ:ММ (например 08:00)",
-        reply_markup=ReplyKeyboardRemove()
-    )
-
-    await state.set_state(Form.wait_time)
-
-
-@router.message(Form.wait_time)
-async def get_time(message: types.Message, state: FSMContext):
-    if not message.text:
-        await message.answer("❌ Пожалуйста, введите время текстом в формате ЧЧ:ММ")
-        return
-    time_str = message.text.strip()
     try:
-        hour, minute = map(int, time_str.split(":"))
+        hour, minute = map(int, text.strip().split(":"))
+    except ValueError:
+        return None
 
-        if not (0 <= hour < 24):
-            raise ValueError("Неверный час")
-        if not (0 <= minute <=59):
-            raise ValueError("Минуты должны быть  от 0 до 59")
-        if minute % 5 !=0:
-            raise ValueError("Минуты должны быть кратны 5 (00, 05, 10, 15...)")
-    except ValueError as e:
-        error_text = str(e) if str(e) else "Неверный формат времени"
-        await message.answer(
-            f"❌ {error_text}\n\n"
-            f"Введите время в формате ЧЧ:ММ\n"
-            f"Минуты должны быть кратны 5.\n"
-            f"Примеры: 08:00, 08:05, 08:10, 21:30")
-        return
+    if not (0 <= hour < 24 and 0 <= minute < 60):
+        return None
 
-    data = await state.get_data()
-    lat = data["lat"]
-    lng = data["lng"]
+    if minute % 5 != 0:
+        return None
 
-    await save_location(message.from_user.id, lat, lng, hour, minute)
-
-    await message.answer("✅ Сохранено!", reply_markup=main_keyboard)
-
-    await state.clear()
-
-    text = await build_weather_text(lat, lng)
-    await message.answer(text, parse_mode="HTML")
+    return hour, minute
 
 
-@router.message(F.text == "🌤 Погода сейчас")
-async def weather_now(message: types.Message):
-    user_id = message.from_user.id
-
-    lat, lng = await get_user_location(user_id)
-
-    if lat is None:
-        await message.answer(
-            "Сначала отправь геолокацию 👇",
-            reply_markup=user_location_kb
-        )
-        return
-
-    text = await build_weather_text(lat, lng)
-    await message.answer(text, parse_mode="HTML")
-
-
-@router.message(F.text == "📍 Изменить местоположение")
-async def change_location(message: types.Message, state: FSMContext):
-    await message.answer("Отправь новую геолокацию 👇", reply_markup=user_location_kb)
-    await state.set_state(Form.wait_location)
-
-
-@router.message(F.text == "📋 Мои настройки")
-async def my_settings(message: types.Message):
-    reminder = await get_reminder(message.from_user.id)
-
-    if not reminder:
-        await message.answer("❌ Нет данных. Нажми /start")
-        return
-
-    lat, lng, hour, minute = reminder
-
-    await message.answer(
-        f"📋 <b>Твои настройки</b>\n\n"
-        f"📍 {lat:.3f}, {lng:.3f}\n"
-        f"⏰ {hour:02d}:{minute:02d}",
-        parse_mode="HTML"
+def time_help_text() -> str:
+    return (
+        "Введи время в формате <b>ЧЧ:ММ</b>.\n"
+        "Минуты должны быть кратны 5.\n\n"
+        "Примеры: <b>08:00</b>, <b>08:05</b>, <b>21:30</b>"
     )
 
 
-@router.message(F.text == "⏰ Изменить время")
-async def change_time(message: types.Message, state: FSMContext):
-    reminder = await get_reminder(message.from_user.id)
-
-    if not reminder:
-        await message.answer("❌ Сначала настрой бота через /start")
-        return
-
-    _, _, hour, minute = reminder
-
-    await message.answer(
-        f"Текущее время: {hour:02d}:{minute:02d}\n\n"
-        f"Введи новое время ЧЧ:ММ"
-    )
-
-    await state.set_state(Form.wait_new_time)
+def timezone_for_location(lat: float, lng: float) -> str:
+    return tf.timezone_at(lat=lat, lng=lng) or "Europe/Kyiv"
 
 
-@router.message(Form.wait_new_time)
-async def process_new_time(message: types.Message, state: FSMContext):
+def local_now_for_location(lat: float, lng: float) -> datetime:
+    return datetime.now(ZoneInfo(timezone_for_location(lat, lng)))
+
+
+def weather_advice(temp: float, desc: str, wind: float) -> str:
+    desc_lower = desc.lower()
+
+    if "дожд" in desc_lower:
+        return "Возьми зонт или накинь что-то непромокаемое."
+    if "снег" in desc_lower:
+        return "Обувь с нормальной подошвой сегодня будет кстати."
+    if wind >= 9:
+        return "Ветер заметный, лучше одеться чуть теплее."
+    if temp <= 0:
+        return "Холодно. Перчатки и шапка не будут лишними."
+    if temp < 8:
+        return "Прохладно. Лучше взять тёплый слой."
+    if temp >= 28:
+        return "Жарко. Вода и лёгкая одежда спасут день."
+    return "Погода без крайностей. Одевайся по ощущениям."
+
+
+async def fetch_weather(lat: float, lng: float) -> dict | None:
+    if not API_KEY:
+        logger.error("API_KEY не найден")
+        return None
+
+    url = "https://api.openweathermap.org/data/2.5/weather"
+    params = {
+        "lat": lat,
+        "lon": lng,
+        "appid": API_KEY,
+        "units": "metric",
+        "lang": "ru",
+    }
+
     try:
-        hour, minute = map(int, message.text.split(":"))
-        if not (0 <= hour < 24 and 0 <= minute < 60) or minute % 5 != 0:
-            raise ValueError
-    except:
-        await message.answer("❌ Формат ЧЧ:ММ. Минуты должны быть кратны 5: 08:00, 08:05, 21:30")
-        return
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=15) as resp:
+                data = await resp.json()
+    except aiohttp.ClientError as e:
+        logger.error("Ошибка запроса OpenWeatherMap: %s", e)
+        return None
 
-    reminder = await get_reminder(message.from_user.id)
+    if str(data.get("cod")) != "200":
+        logger.error("OpenWeatherMap вернул ошибку: %s", data)
+        return None
 
-    if not reminder:
-        await message.answer("Ошибка. Нажми /start")
-        await state.clear()
-        return
-
-    lat, lng, _, _ = reminder
-
-    await save_location(message.from_user.id, lat, lng, hour, minute)
-    await message.answer(
-        f"✅ Новое время: {hour:02d}:{minute:02d}",
-        reply_markup=main_keyboard
-    )
-
-    await state.clear()
+    return data
 
 
 async def build_weather_text(lat: float, lng: float) -> str:
-    if not API_KEY:
-        logger.error("API_KEY не найден")
-        return "❌ Не найден API_KEY для OpenWeatherMap"
-
-    url = (
-        f"https://api.openweathermap.org/data/2.5/weather?"
-        f"lat={lat}&lon={lng}&appid={API_KEY}"
-        f"&units=metric&lang=ru"
-    )
-
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, timeout=15) as resp:
-                data = await resp.json()
-        except aiohttp.ClientError as e:
-            logger.error("Ошибка запроса погоды: %s", e)
-            return "❌ Не удалось получить погоду. Попробуй позже."
-
-    if data.get("cod") != 200:
-        logger.error(data)
-        return "❌ Ошибка получения погоды"
+    data = await fetch_weather(lat, lng)
+    if not data:
+        return "❌ Не удалось получить погоду. Проверь API_KEY или попробуй позже."
 
     temp = data["main"]["temp"]
-    feel = data["main"]["feels_like"]
+    feels_like = data["main"]["feels_like"]
+    humidity = data["main"].get("humidity")
+    pressure = data["main"].get("pressure")
     desc = data["weather"][0]["description"]
     wind = data["wind"]["speed"]
     sunrise_ts = data["sys"]["sunrise"]
     sunset_ts = data["sys"]["sunset"]
 
-
-    tz_name = tf.timezone_at(lat=lat, lng=lng) or "Europe/Kyiv"
+    tz_name = timezone_for_location(lat, lng)
     tz = ZoneInfo(tz_name)
-
-
+    local_time = datetime.now(tz)
     sunrise_time = datetime.fromtimestamp(sunrise_ts, tz=tz)
     sunset_time = datetime.fromtimestamp(sunset_ts, tz=tz)
-    local_time = datetime.now(ZoneInfo(tz_name))
+
+    pressure_text = f"\nДавление: {pressure} гПа" if pressure else ""
+    humidity_text = f"\nВлажность: {humidity}%" if humidity is not None else ""
 
     return (
-        f"🌤 <b>Погода сейчас</b>\n"
-        f"🕒 {local_time.strftime('%H:%M')}\n\n"
+        "🌤 <b>Погода сейчас</b>\n"
+        f"🕒 Местное время: <b>{local_time.strftime('%H:%M')}</b>\n\n"
         f"🌡 Температура: <b>{temp:.1f}°C</b>\n"
-        f"{escape(desc.capitalize())}\n\n"
-        f"🤔 Ощущается: {feel:.1f}°C\n"
-        f"💨 Ветер: {wind} м/с\n\n"
-        f"Рассвет в {sunrise_time.strftime('%H:%M')}\n"
-        f"Закат в {sunset_time.strftime('%H:%M')}"
+        f"🤔 Ощущается: <b>{feels_like:.1f}°C</b>\n"
+        f"☁️ {escape(desc.capitalize())}\n"
+        f"💨 Ветер: <b>{wind:.1f} м/с</b>"
+        f"{humidity_text}"
+        f"{pressure_text}\n\n"
+        f"🌅 Рассвет: {sunrise_time.strftime('%H:%M')}\n"
+        f"🌇 Закат: {sunset_time.strftime('%H:%M')}\n\n"
+        f"💡 {weather_advice(temp, desc, wind)}"
     )
 
 
+async def ask_for_location(message: types.Message, state: FSMContext):
+    await message.answer(
+        "Отправь геолокацию, чтобы я показывал погоду и присылал прогноз в твоё местное время.",
+        reply_markup=location_keyboard,
+    )
+    await state.set_state(Form.wait_location)
+
+
+@router.message(Command("start"))
+async def start(message: types.Message, state: FSMContext):
+    reminder = await get_reminder(message.from_user.id)
+    name = message.from_user.first_name or "друг"
+
+    if reminder:
+        await message.answer(
+            f"👋 Привет, {escape(name)}.\n\n"
+            "Я уже помню твои настройки. Можешь посмотреть погоду сейчас или изменить время рассылки.",
+            reply_markup=main_keyboard,
+        )
+        return
+
+    await message.answer(
+        f"👋 Привет, {escape(name)}.\n\n"
+        "Я буду показывать погоду и присылать ежедневный прогноз в выбранное время.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await ask_for_location(message, state)
+
+
+@router.message(Form.wait_location, F.location)
+async def handle_location(message: types.Message, state: FSMContext):
+    lat = message.location.latitude
+    lng = message.location.longitude
+    await state.update_data(lat=lat, lng=lng)
+
+    await message.answer(
+        "📍 Геолокация получена.\n\n" + time_help_text(),
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await state.set_state(Form.wait_time)
+
+
+@router.message(Form.wait_location)
+async def handle_location_missing(message: types.Message):
+    await message.answer("Нужно отправить именно геолокацию кнопкой ниже.", reply_markup=location_keyboard)
+
+
+@router.message(Form.wait_time)
+async def handle_time(message: types.Message, state: FSMContext):
+    parsed = parse_time(message.text)
+    if not parsed:
+        await message.answer("❌ Некорректное время.\n\n" + time_help_text(), parse_mode="HTML")
+        return
+
+    hour, minute = parsed
+    data = await state.get_data()
+    lat = data["lat"]
+    lng = data["lng"]
+
+    await save_reminder(message.from_user.id, lat, lng, hour, minute)
+    await state.clear()
+
+    await message.answer(
+        f"✅ Готово. Буду присылать прогноз в <b>{hour:02d}:{minute:02d}</b> по местному времени.",
+        parse_mode="HTML",
+        reply_markup=main_keyboard,
+    )
+
+    await message.answer(await build_weather_text(lat, lng), parse_mode="HTML")
+
+
+@router.message(F.text == BTN_WEATHER_NOW)
+async def weather_now(message: types.Message, state: FSMContext):
+    lat, lng = await get_user_location(message.from_user.id)
+
+    if lat is None or lng is None:
+        await ask_for_location(message, state)
+        return
+
+    await message.answer(await build_weather_text(lat, lng), parse_mode="HTML")
+
+
+@router.message(F.text == BTN_CHANGE_LOCATION)
+async def change_location(message: types.Message, state: FSMContext):
+    await ask_for_location(message, state)
+
+
+@router.message(F.text == BTN_SETTINGS)
+async def my_settings(message: types.Message):
+    reminder = await get_reminder(message.from_user.id)
+
+    if not reminder:
+        await message.answer("Настроек пока нет. Нажми /start и отправь геолокацию.")
+        return
+
+    tz_name = timezone_for_location(reminder.lat, reminder.lng)
+    local_time = local_now_for_location(reminder.lat, reminder.lng)
+
+    await message.answer(
+        "📋 <b>Настройки</b>\n\n"
+        f"📍 Координаты: <b>{reminder.lat:.3f}, {reminder.lng:.3f}</b>\n"
+        f"🌍 Часовой пояс: <b>{escape(tz_name)}</b>\n"
+        f"🕒 Сейчас там: <b>{local_time.strftime('%H:%M')}</b>\n"
+        f"⏰ Рассылка: <b>{reminder.hour:02d}:{reminder.minute:02d}</b>",
+        parse_mode="HTML",
+    )
+
+
+@router.message(F.text == BTN_CHANGE_TIME)
+async def change_time(message: types.Message, state: FSMContext):
+    reminder = await get_reminder(message.from_user.id)
+
+    if not reminder:
+        await message.answer("Сначала настрой бота через /start.")
+        return
+
+    await message.answer(
+        f"Текущее время рассылки: <b>{reminder.hour:02d}:{reminder.minute:02d}</b>\n\n"
+        + time_help_text(),
+        parse_mode="HTML",
+    )
+    await state.set_state(Form.wait_new_time)
+
+
+@router.message(Form.wait_new_time)
+async def process_new_time(message: types.Message, state: FSMContext):
+    parsed = parse_time(message.text)
+    if not parsed:
+        await message.answer("❌ Некорректное время.\n\n" + time_help_text(), parse_mode="HTML")
+        return
+
+    reminder = await get_reminder(message.from_user.id)
+    if not reminder:
+        await message.answer("Настройки не найдены. Нажми /start.")
+        await state.clear()
+        return
+
+    hour, minute = parsed
+    await save_reminder(message.from_user.id, reminder.lat, reminder.lng, hour, minute)
+    await state.clear()
+
+    await message.answer(
+        f"✅ Новое время рассылки: <b>{hour:02d}:{minute:02d}</b>",
+        parse_mode="HTML",
+        reply_markup=main_keyboard,
+    )
+
+
+async def should_notify_now(reminder: Reminder) -> bool:
+    local_now = local_now_for_location(reminder.lat, reminder.lng)
+    return local_now.hour == reminder.hour and local_now.minute == reminder.minute
+
+
 async def daily_weather():
-    """Отправляет погоду пользователям в их выбранное локальное время."""
     now_kyiv = datetime.now(ZoneInfo("Europe/Kyiv"))
     logger.info("Проверка рассылки на %s (Киев)", now_kyiv.strftime("%H:%M"))
 
     try:
         reminders = await get_all_reminders()
-        users_to_notify = []
-
-        for reminder in reminders:
-            user_id, lat, lng, hour, minute = reminder
-            tz_name = tf.timezone_at(lat=lat, lng=lng) or "Europe/Kyiv"
-            local_now = datetime.now(ZoneInfo(tz_name))
-
-            if local_now.hour == hour and local_now.minute == minute:
-                users_to_notify.append(reminder)
+        users_to_notify = [reminder for reminder in reminders if await should_notify_now(reminder)]
 
         if not users_to_notify:
             logger.debug("На это время нет пользователей для рассылки")
             return
 
         success = 0
-        for user in users_to_notify:
-            user_id, lat, lng, hour, minute = user
-
+        for reminder in users_to_notify:
             try:
-                text = await build_weather_text(lat, lng)
-                if text:
-                    await bot.send_message(
-                        chat_id=user_id,
-                        text=f"⏰ <b>Ваш ежедневный прогноз на {hour:02d}:{minute:02d}</b>\n\n{text}",
-                        parse_mode="HTML"
-                    )
-                    success += 1
-                    logger.info(f"Прогноз отправлен пользователю {user_id}")
-                else:
-                    logger.warning(f"Не удалось получить погоду для пользователя {user_id}")
+                text = await build_weather_text(reminder.lat, reminder.lng)
+                await bot.send_message(
+                    chat_id=reminder.user_id,
+                    text=(
+                        f"⏰ <b>Ежедневный прогноз на {reminder.hour:02d}:{reminder.minute:02d}</b>\n\n"
+                        f"{text}"
+                    ),
+                    parse_mode="HTML",
+                )
+                success += 1
+                logger.info("Прогноз отправлен пользователю %s", reminder.user_id)
             except Exception as e:
-                logger.error(f"Ошибка отправки пользователю {user_id}: {e}")
+                logger.error("Ошибка отправки пользователю %s: %s", reminder.user_id, e)
 
-        logger.info(f"Рассылка завершена. Успешно отправлено: {success}/{len(users_to_notify)}")
-
+        logger.info("Рассылка завершена: %s/%s", success, len(users_to_notify))
     except Exception as e:
-        logger.error(f"Ошибка при выполнении рассылки: {e}", exc_info=True)
+        logger.error("Ошибка при выполнении рассылки: %s", e, exc_info=True)
