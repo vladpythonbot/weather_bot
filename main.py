@@ -5,7 +5,7 @@ import logging
 from apscheduler.triggers.cron import CronTrigger
 
 from bot import bot, dp
-from routers import router,daily_weather
+from routers import router, daily_weather
 from db import init_db
 
 logging.basicConfig(
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 async def main():
     await init_db()
-    print("✅База данных инициализирована")
+    logger.info("База данных инициализирована")
 
     dp.include_router(router)
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -26,20 +26,22 @@ async def main():
 
     scheduler = AsyncIOScheduler(timezone="Europe/Kyiv")
 
-    scheduler.add_job(daily_weather, # вызов функции из роутера
-    CronTrigger(minute="*/5"),
-    id="daily_weather",
-    replace_existing=True,)
+    scheduler.add_job(
+        daily_weather,
+        CronTrigger(minute="*/5"),
+        id="daily_weather",
+        replace_existing=True,
+    )
 
-    logger.info("Планировщик запущен — проверка времени рассылки каждую минуту")
+    logger.info("Планировщик запущен: проверка рассылки каждые 5 минут")
     scheduler.start()
-    print("Бот запущен")
+    logger.info("Бот запущен")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        print("Бот остановлен")
+        logger.info("Бот остановлен")
     except Exception as e:
-        logger.error(e)
+        logger.exception("Критическая ошибка: %s", e)

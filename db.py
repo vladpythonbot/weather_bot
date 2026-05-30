@@ -1,11 +1,17 @@
 # db.py
+import os
+from pathlib import Path
+
 import aiosqlite
 
-DB_NAME = "reminders.db"
+
+DB_NAME = os.getenv("DB_PATH", str(Path(__file__).with_name("reminders.db")))
 
 async def init_db():
-    async with aiosqlite.connect("reminders.db") as db:
-        await db.execute("""CREATE TABLE reminders (
+    Path(DB_NAME).parent.mkdir(parents=True, exist_ok=True)
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("""CREATE TABLE IF NOT EXISTS reminders (
                 user_id INTEGER PRIMARY KEY,
                 lat REAL NOT NULL,
                 lng REAL NOT NULL,
@@ -14,7 +20,6 @@ async def init_db():
             )
         """)
         await db.commit()
-    print(f"Таблица 'reminders' готова в файле {DB_NAME}")
 
 
 async def save_location(user_id: int, lat: float, lng: float, hour: int, minute: int):
@@ -51,3 +56,12 @@ async def get_reminder(user_id: int):
 
         result = await cursor.fetchone()
         return result
+
+
+async def get_all_reminders():
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("""
+            SELECT user_id, lat, lng, hour, minute
+            FROM reminders
+        """)
+        return await cursor.fetchall()

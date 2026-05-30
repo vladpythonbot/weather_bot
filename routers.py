@@ -1,13 +1,13 @@
 import aiohttp
 import logging
 from datetime import datetime
+from html import escape
 from zoneinfo import ZoneInfo
 
 import dotenv
 import os
 dotenv.load_dotenv()
 API_KEY = os.getenv("API_KEY")
-import aiosqlite
 from timezonefinder import TimezoneFinder
 from bot import bot
 from aiogram import Router, types, F
@@ -16,13 +16,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 
-from db import save_location, get_user_location, get_reminder
+from db import save_location, get_user_location, get_reminder, get_all_reminders
 
 daily_logger = logging.getLogger("daily_weather")
 daily_logger.setLevel(logging.DEBUG)
 handler = logging.StreamHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"))
-daily_logger.addHandler(handler)
+if not daily_logger.handlers:
+    daily_logger.addHandler(handler)
 
 router = Router()
 tf = TimezoneFinder()
@@ -182,10 +183,10 @@ async def change_time(message: types.Message, state: FSMContext):
 async def process_new_time(message: types.Message, state: FSMContext):
     try:
         hour, minute = map(int, message.text.split(":"))
-        if not (0 <= hour < 24 and 0 <= minute < 60):
+        if not (0 <= hour < 24 and 0 <= minute < 60) or minute % 5 != 0:
             raise ValueError
     except:
-        await message.answer("❌ Формат ЧЧ:ММ")
+        await message.answer("❌ Формат ЧЧ:ММ. Минуты должны быть кратны 5: 08:00, 08:05, 21:30")
         return
 
     reminder = await get_reminder(message.from_user.id)
@@ -207,6 +208,10 @@ async def process_new_time(message: types.Message, state: FSMContext):
 
 
 async def build_weather_text(lat: float, lng: float) -> str:
+    if not API_KEY:
+        logger.error("API_KEY не найден")
+        return "❌ Не найден API_KEY для OpenWeatherMap"
+
     url = (
         f"https://api.openweathermap.org/data/2.5/weather?"
         f"lat={lat}&lon={lng}&appid={API_KEY}"
@@ -214,8 +219,12 @@ async def build_weather_text(lat: float, lng: float) -> str:
     )
 
     async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            data = await resp.json()
+        try:
+            async with session.get(url, timeout=15) as resp:
+                data = await resp.json()
+        except aiohttp.ClientError as e:
+            logger.error("Ошибка запроса погоды: %s", e)
+            return "❌ Не удалось получить погоду. Попробуй позже."
 
     if data.get("cod") != 200:
         logger.error(data)
@@ -230,42 +239,41 @@ async def build_weather_text(lat: float, lng: float) -> str:
 
 
     tz_name = tf.timezone_at(lat=lat, lng=lng) or "Europe/Kyiv"
-    tZ=ZoneInfo(tz_name)
+    tz = ZoneInfo(tz_name)
 
 
-    sunrise_time=datetime.fromtimestamp(sunrise_ts,tz=tZ)
-    sunset_time=datetime.fromtimestamp(sunset_ts,tz=tZ)
+    sunrise_time = datetime.fromtimestamp(sunrise_ts, tz=tz)
+    sunset_time = datetime.fromtimestamp(sunset_ts, tz=tz)
     local_time = datetime.now(ZoneInfo(tz_name))
 
     return (
         f"🌤 <b>Погода сейчас</b>\n"
         f"🕒 {local_time.strftime('%H:%M')}\n\n"
         f"🌡 Температура: <b>{temp:.1f}°C</b>\n"
-        f"{desc.capitalize()}\n\n"
+        f"{escape(desc.capitalize())}\n\n"
         f"🤔 Ощущается: {feel:.1f}°C\n"
         f"💨 Ветер: {wind} м/с\n\n"
-        f"Рассвет в {sunrise_time.strftime("%H:%M")}\n"
-        f"Закат в {sunset_time.strftime("%H:%M")}"
+        f"Рассвет в {sunrise_time.strftime('%H:%M')}\n"
+        f"Закат в {sunset_time.strftime('%H:%M')}"
     )
 
 
 async def daily_weather():
-    """Отправляет погоду пользователям в их выбранное время"""
-    now = datetime.now(ZoneInfo("Europe/Kyiv"))
-    current_hour = now.hour
-    current_minute = now.minute
-
-    logger.info(f"Проверка рассылки на {current_hour:02d}:{current_minute:02d} (Киев)")
+    """Отправляет погоду пользователям в их выбранное локальное время."""
+    now_kyiv = datetime.now(ZoneInfo("Europe/Kyiv"))
+    logger.info("Проверка рассылки на %s (Киев)", now_kyiv.strftime("%H:%M"))
 
     try:
-        async with aiosqlite.connect("reminders.db") as db:
-            cursor = await db.execute("""
-                SELECT user_id, lat, lng, hour, minute 
-                FROM reminders 
-                WHERE hour = ? AND minute = ?
-            """, (current_hour, current_minute))
+        reminders = await get_all_reminders()
+        users_to_notify = []
 
-            users_to_notify = await cursor.fetchall()
+        for reminder in reminders:
+            user_id, lat, lng, hour, minute = reminder
+            tz_name = tf.timezone_at(lat=lat, lng=lng) or "Europe/Kyiv"
+            local_now = datetime.now(ZoneInfo(tz_name))
+
+            if local_now.hour == hour and local_now.minute == minute:
+                users_to_notify.append(reminder)
 
         if not users_to_notify:
             logger.debug("На это время нет пользователей для рассылки")

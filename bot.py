@@ -13,5 +13,3 @@ if not TOKEN:
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-
-print(f"Бот успешно инициализирован")
