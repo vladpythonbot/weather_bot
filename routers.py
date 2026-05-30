@@ -25,7 +25,6 @@ from db import (
     Reminder,
     get_all_reminders,
     get_reminder,
-    get_user_location,
     save_reminder,
     update_preferences,
 )
@@ -37,12 +36,23 @@ router = Router()
 logger = logging.getLogger(__name__)
 tf = TimezoneFinder()
 
+DAY_NAMES = {
+    0: "Пн",
+    1: "Вт",
+    2: "Ср",
+    3: "Чт",
+    4: "Пт",
+    5: "Сб",
+    6: "Вс",
+}
+
+DEFAULT_SCHEDULE_DAYS = "0,1,2,3,4,5,6"
+
 BTN_WEATHER_NOW = "🌤 Сейчас"
 BTN_DAY_FORECAST = "🌦 День"
 BTN_CHANGE_LOCATION = "📍 Место"
 BTN_CHANGE_TIME = "⏰ Время"
 BTN_SETTINGS = "⚙️ Настройки"
-BTN_SEND_LOCATION = "📍 Отправить геолокацию"
 
 
 class Form(StatesGroup):
@@ -59,13 +69,6 @@ main_keyboard = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
 )
-
-location_keyboard = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text=BTN_SEND_LOCATION, request_location=True)]],
-    resize_keyboard=True,
-    one_time_keyboard=True,
-)
-
 
 def parse_time(text: str | None) -> tuple[int, int] | None:
     if not text:
@@ -99,6 +102,37 @@ def timezone_for_location(lat: float, lng: float) -> str:
 
 def local_now_for_location(lat: float, lng: float) -> datetime:
     return datetime.now(ZoneInfo(timezone_for_location(lat, lng)))
+
+
+def parse_schedule_days(value: str | None) -> set[int]:
+    if not value:
+        return set(range(7))
+
+    days = set()
+    for part in value.split(","):
+        if part.strip().isdigit():
+            day = int(part)
+            if 0 <= day <= 6:
+                days.add(day)
+
+    return days or set(range(7))
+
+
+def format_schedule_days(value: str | None) -> str:
+    days = parse_schedule_days(value)
+
+    if days == set(range(7)):
+        return "каждый день"
+    if days == set(range(5)):
+        return "будни"
+    if days == {5, 6}:
+        return "выходные"
+
+    return ", ".join(DAY_NAMES[day] for day in sorted(days))
+
+
+def serialize_schedule_days(days: set[int]) -> str:
+    return ",".join(str(day) for day in sorted(days)) or DEFAULT_SCHEDULE_DAYS
 
 
 def wind_text(speed_ms: float, wind_unit: str) -> str:
@@ -195,6 +229,47 @@ async def fetch_openweather(endpoint: str, lat: float, lng: float) -> dict | Non
     return data
 
 
+async def geocode_city(city: str) -> dict | None:
+    if not API_KEY:
+        logger.error("API_KEY не найден")
+        return None
+
+    url = "https://api.openweathermap.org/geo/1.0/direct"
+    params = {
+        "q": city.strip(),
+        "limit": 1,
+        "appid": API_KEY,
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=15) as resp:
+                data = await resp.json()
+    except aiohttp.ClientError as e:
+        logger.error("Ошибка геокодинга OpenWeatherMap: %s", e)
+        return None
+
+    if not isinstance(data, list) or not data:
+        return None
+
+    result = data[0]
+    local_names = result.get("local_names") or {}
+    name = local_names.get("ru") or result.get("name") or city.strip()
+    country = result.get("country")
+    state = result.get("state")
+    parts = [name]
+    if state and state != name:
+        parts.append(state)
+    if country:
+        parts.append(country)
+
+    return {
+        "lat": result["lat"],
+        "lng": result["lon"],
+        "city_name": ", ".join(parts),
+    }
+
+
 async def fetch_weather(lat: float, lng: float) -> dict | None:
     return await fetch_openweather("weather", lat, lng)
 
@@ -263,13 +338,10 @@ def details_text(data: dict, reminder: Reminder) -> str:
         return ""
 
     humidity = data["main"].get("humidity")
-    pressure = data["main"].get("pressure")
     parts = []
 
     if humidity is not None:
         parts.append(f"Влажность: {humidity}%")
-    if pressure:
-        parts.append(f"Давление: {pressure} гПа")
 
     return "\n".join(parts) + ("\n" if parts else "")
 
@@ -383,8 +455,10 @@ async def build_go_out_text(reminder: Reminder) -> str:
 
 async def ask_for_location(message: types.Message, state: FSMContext):
     await message.answer(
-        "Отправь геолокацию, чтобы я показывал погоду и присылал прогноз в твоё местное время.",
-        reply_markup=location_keyboard,
+        "Напиши город, для которого показывать погоду.\n\n"
+        "Например: <b>Киев</b>, <b>Львов</b>, <b>Warsaw</b>.",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove(),
     )
     await state.set_state(Form.wait_location)
 
@@ -419,10 +493,21 @@ async def start(message: types.Message, state: FSMContext):
     await ask_for_location(message, state)
 
 
-@router.message(Form.wait_location, F.location)
+@router.message(Form.wait_location)
 async def handle_location(message: types.Message, state: FSMContext):
-    lat = message.location.latitude
-    lng = message.location.longitude
+    city = (message.text or "").strip()
+    if len(city) < 2:
+        await message.answer("Напиши название города текстом. Например: <b>Киев</b>.", parse_mode="HTML")
+        return
+
+    place = await geocode_city(city)
+    if not place:
+        await message.answer("Не нашёл такой город. Попробуй написать по-другому, например: <b>Kyiv</b>.", parse_mode="HTML")
+        return
+
+    lat = place["lat"]
+    lng = place["lng"]
+    city_name = place["city_name"]
     reminder = await get_reminder(message.from_user.id)
 
     if reminder:
@@ -432,14 +517,17 @@ async def handle_location(message: types.Message, state: FSMContext):
             lng,
             reminder.hour,
             reminder.minute,
+            city_name=city_name,
             wind_unit=reminder.wind_unit,
             show_details=reminder.show_details,
+            schedule_days=reminder.schedule_days,
         )
         await state.clear()
         updated = await get_reminder(message.from_user.id)
 
         await message.answer(
-            f"✅ Место обновлено. Время прогноза осталось прежним: "
+            f"✅ Город обновлён: <b>{escape(city_name)}</b>.\n"
+            f"Время прогноза осталось прежним: "
             f"<b>{reminder.hour:02d}:{reminder.minute:02d}</b>.",
             parse_mode="HTML",
             reply_markup=main_keyboard,
@@ -447,19 +535,14 @@ async def handle_location(message: types.Message, state: FSMContext):
         await message.answer(await build_weather_text(updated), parse_mode="HTML")
         return
 
-    await state.update_data(lat=lat, lng=lng)
+    await state.update_data(lat=lat, lng=lng, city_name=city_name)
 
     await message.answer(
-        "📍 Геолокация получена.\n\n" + time_help_text(),
+        f"📍 Город найден: <b>{escape(city_name)}</b>.\n\n" + time_help_text(),
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove(),
     )
     await state.set_state(Form.wait_time)
-
-
-@router.message(Form.wait_location)
-async def handle_location_missing(message: types.Message):
-    await message.answer("Нужно отправить именно геолокацию кнопкой ниже.", reply_markup=location_keyboard)
 
 
 @router.message(Form.wait_time)
@@ -473,8 +556,9 @@ async def handle_time(message: types.Message, state: FSMContext):
     data = await state.get_data()
     lat = data["lat"]
     lng = data["lng"]
+    city_name = data["city_name"]
 
-    await save_reminder(message.from_user.id, lat, lng, hour, minute)
+    await save_reminder(message.from_user.id, lat, lng, hour, minute, city_name=city_name)
     await state.clear()
     reminder = await get_reminder(message.from_user.id)
 
@@ -519,7 +603,7 @@ async def show_settings(obj: types.Message | types.CallbackQuery, user_id: int):
     reminder = await get_reminder(user_id)
 
     if not reminder:
-        text = "Настроек пока нет. Нажми /start и отправь геолокацию."
+        text = "Настроек пока нет. Нажми /start и укажи город."
         if isinstance(obj, types.CallbackQuery):
             await obj.message.edit_text(text)
             await obj.answer()
@@ -531,20 +615,36 @@ async def show_settings(obj: types.Message | types.CallbackQuery, user_id: int):
     local_time = local_now_for_location(reminder.lat, reminder.lng)
     wind_label = "км/ч" if reminder.wind_unit == "kmh" else "м/с"
     details_label = "включены" if reminder.show_details else "скрыты"
+    days_label = format_schedule_days(reminder.schedule_days)
+
+    day_buttons = [
+        InlineKeyboardButton(
+            text=("✓ " if day in parse_schedule_days(reminder.schedule_days) else "") + label,
+            callback_data=f"toggle_day_{day}",
+        )
+        for day, label in DAY_NAMES.items()
+    ]
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"Ветер: {wind_label}", callback_data="toggle_wind_unit")],
         [InlineKeyboardButton(text=f"Детали: {details_label}", callback_data="toggle_details")],
+        day_buttons[:4],
+        day_buttons[4:],
+        [
+            InlineKeyboardButton(text="Будни", callback_data="days_weekdays"),
+            InlineKeyboardButton(text="Все дни", callback_data="days_all"),
+        ],
     ])
 
     text = (
         "⚙️ <b>Настройки</b>\n\n"
-        f"📍 Координаты: <b>{reminder.lat:.3f}, {reminder.lng:.3f}</b>\n"
+        f"📍 Город: <b>{escape(reminder.city_name)}</b>\n"
         f"🌍 Часовой пояс: <b>{escape(tz_name)}</b>\n"
         f"🕒 Сейчас там: <b>{local_time.strftime('%H:%M')}</b>\n"
         f"⏰ Прогноз перед выходом: <b>{reminder.hour:02d}:{reminder.minute:02d}</b>\n"
+        f"📅 Дни: <b>{days_label}</b>\n"
         f"💨 Ветер: <b>{wind_label}</b>\n"
-        f"📎 Влажность/давление: <b>{details_label}</b>"
+        f"📎 Влажность: <b>{details_label}</b>"
     )
 
     if isinstance(obj, types.CallbackQuery):
@@ -574,6 +674,43 @@ async def toggle_details(callback: types.CallbackQuery):
         return
 
     await update_preferences(callback.from_user.id, show_details=not reminder.show_details)
+    await show_settings(callback, callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("toggle_day_"))
+async def toggle_schedule_day(callback: types.CallbackQuery):
+    reminder = await get_reminder(callback.from_user.id)
+    if not reminder:
+        await callback.answer("Сначала настрой бота", show_alert=True)
+        return
+
+    day = int(callback.data.split("_")[-1])
+    days = parse_schedule_days(reminder.schedule_days)
+
+    if day in days and len(days) > 1:
+        days.remove(day)
+    else:
+        days.add(day)
+
+    await update_preferences(callback.from_user.id, schedule_days=serialize_schedule_days(days))
+    await show_settings(callback, callback.from_user.id)
+
+
+@router.callback_query(F.data == "days_weekdays")
+async def set_weekdays(callback: types.CallbackQuery):
+    if not await update_preferences(callback.from_user.id, schedule_days="0,1,2,3,4"):
+        await callback.answer("Сначала настрой бота", show_alert=True)
+        return
+
+    await show_settings(callback, callback.from_user.id)
+
+
+@router.callback_query(F.data == "days_all")
+async def set_all_days(callback: types.CallbackQuery):
+    if not await update_preferences(callback.from_user.id, schedule_days=DEFAULT_SCHEDULE_DAYS):
+        await callback.answer("Сначала настрой бота", show_alert=True)
+        return
+
     await show_settings(callback, callback.from_user.id)
 
 
@@ -613,8 +750,10 @@ async def process_new_time(message: types.Message, state: FSMContext):
         reminder.lng,
         hour,
         minute,
+        city_name=reminder.city_name,
         wind_unit=reminder.wind_unit,
         show_details=reminder.show_details,
+        schedule_days=reminder.schedule_days,
     )
     await state.clear()
 
@@ -627,6 +766,9 @@ async def process_new_time(message: types.Message, state: FSMContext):
 
 async def should_notify_now(reminder: Reminder) -> bool:
     local_now = local_now_for_location(reminder.lat, reminder.lng)
+    if local_now.weekday() not in parse_schedule_days(reminder.schedule_days):
+        return False
+
     return local_now.hour == reminder.hour and local_now.minute == reminder.minute
 
 
