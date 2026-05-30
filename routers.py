@@ -1,7 +1,7 @@
 import logging
 import os
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime
 from html import escape
 from zoneinfo import ZoneInfo
 
@@ -28,7 +28,6 @@ from db import (
     get_user_location,
     save_reminder,
     update_preferences,
-    update_sunrise_alarm,
 )
 
 dotenv.load_dotenv()
@@ -40,7 +39,6 @@ tf = TimezoneFinder()
 
 BTN_WEATHER_NOW = "🌤 Сейчас"
 BTN_DAY_FORECAST = "🌦 День"
-BTN_GO_OUT = "🚶 Перед выходом"
 BTN_CHANGE_LOCATION = "📍 Место"
 BTN_CHANGE_TIME = "⏰ Время"
 BTN_SETTINGS = "⚙️ Настройки"
@@ -56,7 +54,6 @@ class Form(StatesGroup):
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text=BTN_WEATHER_NOW), KeyboardButton(text=BTN_DAY_FORECAST)],
-        [KeyboardButton(text=BTN_GO_OUT)],
         [KeyboardButton(text=BTN_CHANGE_LOCATION), KeyboardButton(text=BTN_CHANGE_TIME)],
         [KeyboardButton(text=BTN_SETTINGS)],
     ],
@@ -384,39 +381,6 @@ async def build_go_out_text(reminder: Reminder) -> str:
     )
 
 
-async def sunrise_alarm_payload(reminder: Reminder) -> tuple[str, str] | None:
-    data = await fetch_weather(reminder.lat, reminder.lng)
-    if not data:
-        return None
-
-    tz = ZoneInfo(timezone_for_location(reminder.lat, reminder.lng))
-    local_now = datetime.now(tz)
-    sunrise_time = datetime.fromtimestamp(data["sys"]["sunrise"], tz=tz)
-    alarm_time = sunrise_time - timedelta(minutes=reminder.sunrise_alarm_offset)
-    alarm_date = alarm_time.strftime("%Y-%m-%d")
-
-    if reminder.sunrise_alarm_last_date == alarm_date:
-        return None
-
-    seconds_after_alarm = (local_now - alarm_time).total_seconds()
-    if not (0 <= seconds_after_alarm < 5 * 60):
-        return None
-
-    temp = data["main"]["temp"]
-    desc = data["weather"][0]["description"]
-    city = city_text(data)
-
-    text = (
-        "WAKE_ALARM\n\n"
-        f"🌅 <b>Рассветный будильник · {escape(city)}</b>\n\n"
-        f"Рассвет: <b>{sunrise_time.strftime('%H:%M')}</b>\n"
-        f"Сигнал: <b>{alarm_time.strftime('%H:%M')}</b>\n"
-        f"Сейчас: <b>{temp:.1f}°C</b>, {escape(desc)}\n\n"
-        "Открой шторы и встань на ноги. Остальное потом."
-    )
-    return alarm_date, text
-
-
 async def ask_for_location(message: types.Message, state: FSMContext):
     await message.answer(
         "Отправь геолокацию, чтобы я показывал погоду и присылал прогноз в твоё местное время.",
@@ -442,7 +406,7 @@ async def start(message: types.Message, state: FSMContext):
     if reminder:
         await message.answer(
             f"👋 Привет, {escape(name)}.\n\n"
-            "Я уже помню твои настройки. Можешь посмотреть погоду, прогноз на день или подсказку перед выходом.",
+            "Я уже помню твои настройки. Можешь посмотреть погоду сейчас или прогноз на день.",
             reply_markup=main_keyboard,
         )
         return
@@ -541,15 +505,6 @@ async def day_forecast(message: types.Message, state: FSMContext):
     await message.answer(await build_day_forecast_text(reminder), parse_mode="HTML")
 
 
-@router.message(F.text == BTN_GO_OUT)
-async def go_out_forecast(message: types.Message, state: FSMContext):
-    reminder = await get_or_ask_reminder(message, state)
-    if not reminder:
-        return
-
-    await message.answer(await build_go_out_text(reminder), parse_mode="HTML")
-
-
 @router.message(F.text == BTN_CHANGE_LOCATION)
 async def change_location(message: types.Message, state: FSMContext):
     await ask_for_location(message, state)
@@ -576,17 +531,10 @@ async def show_settings(obj: types.Message | types.CallbackQuery, user_id: int):
     local_time = local_now_for_location(reminder.lat, reminder.lng)
     wind_label = "км/ч" if reminder.wind_unit == "kmh" else "м/с"
     details_label = "включены" if reminder.show_details else "скрыты"
-    alarm_label = "включён" if reminder.sunrise_alarm_enabled else "выключен"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"Ветер: {wind_label}", callback_data="toggle_wind_unit")],
         [InlineKeyboardButton(text=f"Детали: {details_label}", callback_data="toggle_details")],
-        [InlineKeyboardButton(text=f"🌅 Будильник: {alarm_label}", callback_data="toggle_sunrise_alarm")],
-        [
-            InlineKeyboardButton(text="За 0 мин", callback_data="sunrise_offset_0"),
-            InlineKeyboardButton(text="За 10 мин", callback_data="sunrise_offset_10"),
-            InlineKeyboardButton(text="За 20 мин", callback_data="sunrise_offset_20"),
-        ],
     ])
 
     text = (
@@ -596,10 +544,7 @@ async def show_settings(obj: types.Message | types.CallbackQuery, user_id: int):
         f"🕒 Сейчас там: <b>{local_time.strftime('%H:%M')}</b>\n"
         f"⏰ Прогноз перед выходом: <b>{reminder.hour:02d}:{reminder.minute:02d}</b>\n"
         f"💨 Ветер: <b>{wind_label}</b>\n"
-        f"📎 Влажность/давление: <b>{details_label}</b>\n"
-        f"🌅 Рассветный будильник: <b>{alarm_label}</b>\n"
-        f"🔔 Сигнал: <b>за {reminder.sunrise_alarm_offset} мин до рассвета</b>\n\n"
-        "<i>Для громкого звука настрой MacroDroid на уведомление с текстом WAKE_ALARM.</i>"
+        f"📎 Влажность/давление: <b>{details_label}</b>"
     )
 
     if isinstance(obj, types.CallbackQuery):
@@ -629,29 +574,6 @@ async def toggle_details(callback: types.CallbackQuery):
         return
 
     await update_preferences(callback.from_user.id, show_details=not reminder.show_details)
-    await show_settings(callback, callback.from_user.id)
-
-
-@router.callback_query(F.data == "toggle_sunrise_alarm")
-async def toggle_sunrise_alarm(callback: types.CallbackQuery):
-    reminder = await get_reminder(callback.from_user.id)
-    if not reminder:
-        await callback.answer("Сначала настрой бота", show_alert=True)
-        return
-
-    await update_sunrise_alarm(callback.from_user.id, enabled=not reminder.sunrise_alarm_enabled)
-    await show_settings(callback, callback.from_user.id)
-
-
-@router.callback_query(F.data.startswith("sunrise_offset_"))
-async def set_sunrise_offset(callback: types.CallbackQuery):
-    reminder = await get_reminder(callback.from_user.id)
-    if not reminder:
-        await callback.answer("Сначала настрой бота", show_alert=True)
-        return
-
-    offset = int(callback.data.split("_")[-1])
-    await update_sunrise_alarm(callback.from_user.id, enabled=True, offset=offset)
     await show_settings(callback, callback.from_user.id)
 
 
@@ -738,30 +660,5 @@ async def daily_weather():
 
             logger.info("Рассылка завершена: %s/%s", success, len(users_to_notify))
 
-        alarm_success = 0
-        for reminder in reminders:
-            if not reminder.sunrise_alarm_enabled:
-                continue
-
-            try:
-                payload = await sunrise_alarm_payload(reminder)
-                if not payload:
-                    continue
-
-                alarm_date, text = payload
-                await bot.send_message(
-                    chat_id=reminder.user_id,
-                    text=text,
-                    parse_mode="HTML",
-                    disable_notification=False,
-                )
-                await update_sunrise_alarm(reminder.user_id, last_date=alarm_date)
-                alarm_success += 1
-                logger.info("Рассветный будильник отправлен пользователю %s", reminder.user_id)
-            except Exception as e:
-                logger.error("Ошибка рассветного будильника для %s: %s", reminder.user_id, e)
-
-        if alarm_success:
-            logger.info("Рассветных будильников отправлено: %s", alarm_success)
     except Exception as e:
         logger.error("Ошибка при выполнении рассылки: %s", e, exc_info=True)
