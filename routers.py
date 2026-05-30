@@ -173,7 +173,7 @@ def weather_advice(temp: float, desc: str, wind: float) -> str:
     return "Погода спокойная. Одевайся по ощущениям."
 
 
-def go_out_advice(temp: float, desc: str, wind: float, pop: float | None = None) -> str:
+def forecast_advice(temp: float, desc: str, wind: float, pop: float | None = None) -> str:
     tips = []
     desc_lower = desc.lower()
 
@@ -197,7 +197,7 @@ def go_out_advice(temp: float, desc: str, wind: float, pop: float | None = None)
     if not tips:
         return "Можно выходить без особой подготовки."
 
-    return "Перед выходом: " + ", ".join(dict.fromkeys(tips)) + "."
+    return "Стоит учесть: " + ", ".join(dict.fromkeys(tips)) + "."
 
 
 async def fetch_openweather(endpoint: str, lat: float, lng: float) -> dict | None:
@@ -415,22 +415,22 @@ async def build_day_forecast_text(reminder: Reminder) -> str:
     max_wind = max(item["wind"]["speed"] for item in items)
     desc = Counter(item["weather"][0]["description"] for item in items).most_common(1)[0][0]
     lines.append("")
-    lines.append(f"💡 {go_out_advice(avg_temp, desc, max_wind, max_pop)}")
+    lines.append(f"💡 {forecast_advice(avg_temp, desc, max_wind, max_pop)}")
 
     return "\n".join(lines)
 
 
-async def build_go_out_text(reminder: Reminder) -> str:
+async def build_daily_forecast_text(reminder: Reminder) -> str:
     data = await fetch_forecast(reminder.lat, reminder.lng)
     if not data:
         weather = await fetch_weather(reminder.lat, reminder.lng)
         if not weather:
-            return "❌ Не удалось получить прогноз перед выходом. Попробуй позже."
+            return "❌ Не удалось получить прогноз. Попробуй позже."
 
         return (
-            f"🚶 <b>Перед выходом · {escape(city_text(weather))}</b>\n\n"
+            f"🌤 <b>Прогноз · {escape(city_text(weather))}</b>\n\n"
             f"Сейчас {weather['main']['temp']:.1f}°C, {escape(weather['weather'][0]['description'])}.\n"
-            f"💡 {go_out_advice(weather['main']['temp'], weather['weather'][0]['description'], weather['wind']['speed'])}"
+            f"💡 {forecast_advice(weather['main']['temp'], weather['weather'][0]['description'], weather['wind']['speed'])}"
         )
 
     items = forecast_items_for_today(data, reminder.lat, reminder.lng)[:3]
@@ -443,13 +443,13 @@ async def build_go_out_text(reminder: Reminder) -> str:
     time_range = f"{items[0]['local_time'].strftime('%H:%M')}–{items[-1]['local_time'].strftime('%H:%M')}"
 
     return (
-        f"🚶 <b>Перед выходом · {escape(forecast_city_text(data))}</b>\n\n"
+        f"🌤 <b>Прогноз · {escape(forecast_city_text(data))}</b>\n\n"
         f"Ближайшие часы: <b>{time_range}</b>\n"
         f"🌡 {temp:.1f}°C, ощущается {feels:.1f}°C\n"
         f"☁️ {escape(desc.capitalize())}\n"
         f"💨 Ветер: {wind_text(wind, reminder.wind_unit)}\n"
         f"Дождь: {round(pop * 100)}%\n\n"
-        f"💡 {go_out_advice(temp, desc, wind, pop)}"
+        f"💡 {forecast_advice(temp, desc, wind, pop)}"
     )
 
 
@@ -487,7 +487,7 @@ async def start(message: types.Message, state: FSMContext):
 
     await message.answer(
         f"👋 Привет, {escape(name)}.\n\n"
-        "Я буду показывать погоду и присылать прогноз перед выходом в выбранное время.",
+        "Я буду показывать погоду и присылать прогноз в выбранное время.",
         reply_markup=ReplyKeyboardRemove(),
     )
     await ask_for_location(message, state)
@@ -558,13 +558,19 @@ async def handle_time(message: types.Message, state: FSMContext):
     lng = data["lng"]
     city_name = data["city_name"]
 
-    await save_reminder(message.from_user.id, lat, lng, hour, minute, city_name=city_name)
+    await save_reminder(
+        message.from_user.id,
+        lat,
+        lng,
+        hour,
+        minute,
+        city_name=city_name,
+    )
     await state.clear()
     reminder = await get_reminder(message.from_user.id)
 
     await message.answer(
-        f"✅ Готово. Буду присылать прогноз перед выходом в "
-        f"<b>{hour:02d}:{minute:02d}</b> по местному времени.",
+        f"✅ Готово. Буду присылать прогноз в <b>{hour:02d}:{minute:02d}</b>.",
         parse_mode="HTML",
         reply_markup=main_keyboard,
     )
@@ -641,7 +647,7 @@ async def show_settings(obj: types.Message | types.CallbackQuery, user_id: int):
         f"📍 Город: <b>{escape(reminder.city_name)}</b>\n"
         f"🌍 Часовой пояс: <b>{escape(tz_name)}</b>\n"
         f"🕒 Сейчас там: <b>{local_time.strftime('%H:%M')}</b>\n"
-        f"⏰ Прогноз перед выходом: <b>{reminder.hour:02d}:{reminder.minute:02d}</b>\n"
+        f"⏰ Прогноз: <b>{reminder.hour:02d}:{reminder.minute:02d}</b>\n"
         f"📅 Дни: <b>{days_label}</b>\n"
         f"💨 Ветер: <b>{wind_label}</b>\n"
         f"📎 Влажность: <b>{details_label}</b>"
@@ -723,7 +729,7 @@ async def change_time(message: types.Message, state: FSMContext):
         return
 
     await message.answer(
-        f"Текущее время прогноза перед выходом: <b>{reminder.hour:02d}:{reminder.minute:02d}</b>\n\n"
+        f"Текущее время прогноза: <b>{reminder.hour:02d}:{reminder.minute:02d}</b>\n\n"
         + time_help_text(),
         parse_mode="HTML",
     )
@@ -758,7 +764,7 @@ async def process_new_time(message: types.Message, state: FSMContext):
     await state.clear()
 
     await message.answer(
-        f"✅ Новое время прогноза перед выходом: <b>{hour:02d}:{minute:02d}</b>",
+        f"✅ Новое время прогноза: <b>{hour:02d}:{minute:02d}</b>",
         parse_mode="HTML",
         reply_markup=main_keyboard,
     )
@@ -786,11 +792,11 @@ async def daily_weather():
         else:
             for reminder in users_to_notify:
                 try:
-                    text = await build_go_out_text(reminder)
+                    text = await build_daily_forecast_text(reminder)
                     await bot.send_message(
                         chat_id=reminder.user_id,
                         text=(
-                            f"⏰ <b>Прогноз перед выходом на {reminder.hour:02d}:{reminder.minute:02d}</b>\n\n"
+                            f"⏰ <b>Прогноз на {local_now_for_location(reminder.lat, reminder.lng).strftime('%H:%M')}</b>\n\n"
                             f"{text}"
                         ),
                         parse_mode="HTML",
